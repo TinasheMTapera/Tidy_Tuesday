@@ -1,0 +1,159 @@
+---
+title: "Tidy Tuesday `r Sys.Date()`"
+author: "Tinashe Michael Tapera"
+params:
+  week: 32
+---
+
+## Week `r params$week`
+
+```{r}
+library(tidytuesdayR)
+library(ggplot2)
+library(dplyr)
+library(GGally)
+library(lubridate)
+library(stringr)
+library(purrr)
+library(tidyr)
+library(bizdays)
+library(forcats)
+library(gganimate)
+
+load_rmetrics_calendars(1975:2100)
+```
+
+For this week we are visualising data about ferris wheels!
+
+> The goal of ferriswheels is to provide a fun harmless little data set to play with
+
+Not much to be said here, so let's check out the data.
+
+## First Look
+
+```{r}
+tt_data <- tt_load(2022, week = params$week)
+df <- tt_data$wheels %>%
+  select(-1)
+```
+
+```{r}
+summary(df)
+```
+
+I think I need a confusion matrix here:
+
+```{r, warning=FALSE}
+df %>%
+  select(where(is.numeric)) %>%
+  ggpairs(progress = FALSE)
+```
+
+Do ferris wheels get bigger over time?
+
+```{r}
+df %>%
+  mutate(opened = as_date(opened)) %>%
+  ggplot(aes(x=opened, y = height)) +
+  geom_point()
+```
+
+Yes, but that's not interesting.
+
+Here's a thought: since we have ticket-cost-to-ride and the construction cost,
+why don't we project when the wheel would hypothetically break even.
+
+```{r}
+df_ <- df %>%
+  
+  # basic cleaning
+  # find rows where the construction or ticket cost is not NA
+  filter(if_all(c(contains("cost"), hourly_capacity), ~ !is.na(.) & . != "Unknown")) %>%
+  mutate(opened = as_date(opened)) %>%
+  select(name, contains("cost"), hourly_capacity, opened) %>%
+  
+  # convert to numeric
+  # note that this only grabs the first cost value (ie no VIP or children's tickets)
+  mutate(ticket_cost_to_ride = str_extract(ticket_cost_to_ride, "[0-9.]+") %>%
+           as.numeric()) %>%
+  filter(!is.na(ticket_cost_to_ride)) %>%
+  mutate(construction_cost = str_extract(construction_cost, "[0-9.]+") %>%
+           as.numeric() * 1000000) %>%
+  
+  # calculate the breakeven date
+  mutate(breakeven_tix = (construction_cost / ticket_cost_to_ride)) %>%
+  mutate(breakeven_hours = (breakeven_tix / hourly_capacity)) %>%
+  mutate(breakeven_days = (breakeven_hours / 8) %>% ceiling()) %>%
+  mutate(breakeven_date = offset(opened, breakeven_days, "Rmetrics/NYSE")) %>%
+  
+  # create a sequence of days between opening and breakeven for plotting
+  mutate(working_days = map2(opened, breakeven_date, bizseq, cal="Rmetrics/NYSE")) %>%
+  unnest(working_days) %>%
+  group_by(name) %>%
+  mutate(day_index = 1:n()) %>%
+  mutate(cumulative_revenue = ticket_cost_to_ride * hourly_capacity * 8 * day_index) %>%
+  #slice_max(cumulative_revenue) %>%
+  ungroup() %>%
+  mutate(name = str_remove(name, "\\(1\\)")) %>%
+  mutate(name = str_c(name, " ($", construction_cost /1000000, "M USD)")) %>%
+  mutate(name = as.factor(name)) %>%
+  mutate(name = fct_reorder(name, day_index))
+  
+# add extra lines of max revenue until longest has been reached
+# this is for persistence of frames in the animated gif
+max_days <- max(df_$day_index) + 1
+
+df_ <- df_ %>%
+  nest(data = -name) %>%
+  mutate(
+    data = map(
+      data, function(x) {
+        x %>% 
+          add_row(day_index = rep(max(x$day_index), max_days - max(x$day_index))) %>%
+          fill(everything(), .direction = "down")
+      }
+    )
+  ) %>%
+  unnest()
+  
+
+p <- df_ %>%
+  # for testing
+  #filter(day_index < 10) %>%
+  
+  # start the plot
+  ggplot(aes(x = day_index, y = name, fill = name)) +
+  geom_segment(aes(x=1, xend=day_index, y=name, yend=name, colour = name)) +
+  labs(x = "Number of Days of Operation Required to Breakeven",
+       y = "Ride (Construction Cost)") +
+  geom_label(
+    aes(y = name, x = day_index, label = day_index), 
+    size = 5,
+    label.size = 0.1
+    ) +
+  labs(title = "How Long 'Till We Break Even?: Charting the Number of Days\nof Operation Required to Break Even on Ride Construction Costs",
+       subtitle = "Assuming Ride Operates for 8 Hours a Day At Full Capacity") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.line = element_blank(),
+        #axis.text.y = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 18),
+        title = element_text(size = 18),
+        plot.subtitle = element_text(size = 14)
+  )
+p_anim <- p + 
+  transition_reveal(day_index)
+```
+
+Here we go!
+
+```{r}
+#| column: screen
+#| fig-align: center
+animate(p_anim, 200, fps=20, width = 1000, height = 600, end_pause = 20)
+```
+
